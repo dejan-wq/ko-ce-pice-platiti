@@ -1,189 +1,346 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
-<meta name="theme-color" content="#0b0f22">
-<meta name="mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<link rel="manifest" href="manifest.webmanifest">
-<link rel="icon" href="icon-192.png">
-<link rel="apple-touch-icon" href="icon-192.png">
-<title>Bean Bag Toss</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Lilita+One&family=Nunito:wght@600;800;900&display=swap" rel="stylesheet">
-<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
-<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
-<style>
-  :root {
-    --ink: #fff6e6;
-    --muted: #cbbfd9;
-    --blue: #3b82e6;
-    --blue-soft: #9cc2ff;
-    --red: #e5483d;
-    --red-soft: #ffa59d;
-    --gold: #ffc94a;
-    --gold-deep: #b07a17;
-    --panel: rgba(14, 16, 38, 0.72);
+/* =====================================================================
+   UI
+   ===================================================================== */
+function updateHUD() {
+  if (!game) return;
+  $('scoreBlue').textContent = game.score.blue;
+  $('scoreRed').textContent = game.score.red;
+  $('inningNum').textContent = game.inning;
+  $('nameBlue').textContent = nameOf('blue');
+  $('nameRed').textContent = nameOf('red');
+  for (const c of ['blue', 'red']) {
+    const el = $(c === 'blue' ? 'pipsBlue' : 'pipsRed');
+    const left = game.left[c] - (animating && throwBy === c ? 1 : 0);
+    el.innerHTML = '';
+    for (let i = 0; i < 4; i++) { const s = document.createElement('span'); s.className = 'pip' + (i < left ? ' on' : ''); el.appendChild(s); }
   }
-  * { box-sizing: border-box; }
-  html, body {
-    margin: 0; height: 100%; overflow: hidden; overscroll-behavior: none;
-    background: #0b0f22;
+  const active = game.phase === 'aim' || animating ? (animating ? throwBy : game.turn) : null;
+  $('teamBlue').classList.toggle('active', active === 'blue');
+  $('teamRed').classList.toggle('active', active === 'red');
+  let txt = '', col = null;
+  if (game.phase === 'waiting') txt = 'Waiting for your friend to join';
+  else if (mode === 'online' && !oppOnline && game.phase !== 'over') txt = 'Your friend lost connection. Waiting for them to return';
+  else if (game.phase === 'aim' && !animating) {
+    col = game.turn;
+    if (mode === 'local') txt = `${nameOf(game.turn)} to throw`;
+    else txt = nameOf(game.turn) === 'You' ? 'Your throw' : `${nameOf(game.turn)} is throwing`;
   }
-  body {
-    display: flex; align-items: center; justify-content: center;
-    font-family: 'Nunito', system-ui, -apple-system, 'Segoe UI', sans-serif;
-    color: var(--ink);
-    user-select: none; -webkit-user-select: none;
-    -webkit-tap-highlight-color: transparent;
-  }
-  #stage { position: relative; overflow: hidden; background: #121633; }
-  #stage.framed { border-radius: 20px; box-shadow: 0 30px 90px rgba(0,0,0,.65); }
-  canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
-  #ui { position: absolute; left: 0; top: 0; width: 400px; height: 640px; transform-origin: 0 0; pointer-events: none; }
-  #ui button, #ui input, #ui .live { pointer-events: auto; }
-  .hidden { display: none !important; }
+  $('turn').innerHTML = col ? `<span class="dot" style="background:${COLORS[col].base}"></span>${txt}` : txt;
+  $('hint').style.opacity = hintShown && canThrow() ? .85 : 0;
+}
 
-  /* ---------- HUD ---------- */
-  .hud { position: absolute; top: 12px; left: 12px; right: 12px; display: flex; gap: 8px; align-items: stretch; }
-  .team {
-    flex: 1; display: flex; align-items: center; gap: 10px;
-    padding: 8px 12px; border-radius: 14px;
-    background: rgba(10, 12, 30, .58);
-    -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px);
-    border: 2px solid rgba(255,255,255,.07);
-    transition: border-color .3s, box-shadow .3s, transform .3s;
+function updatePanels() {
+  const ph = game ? game.phase : null;
+  $('waitPanel').classList.toggle('hidden', !(mode === 'online' && ph === 'waiting'));
+  $('inningPanel').classList.toggle('hidden', ph !== 'inning');
+  $('overPanel').classList.toggle('hidden', ph !== 'over');
+  if (ph === 'inning' && game.inningResult) {
+    const r = game.inningResult;
+    $('inningTitle').textContent = `End of inning ${game.inning}`;
+    $('inBlueName').textContent = nameOf('blue'); $('inRedName').textContent = nameOf('red');
+    $('inBlue').textContent = r.blue; $('inRed').textContent = r.red;
+    $('inningResult').textContent = r.who
+      ? `${nameOf(r.who)} ${nameOf(r.who) === 'You' ? 'score' : 'scores'} ${r.pts} point${r.pts === 1 ? '' : 's'}`
+      : 'Points cancel out. No score this inning';
   }
-  .team.red { flex-direction: row-reverse; text-align: right; }
-  .team.blue { color: var(--blue-soft); }
-  .team.red { color: var(--red-soft); }
-  .team.active { border-color: currentColor; transform: translateY(1px); }
-  .team.blue.active { box-shadow: 0 0 22px rgba(59,130,230,.45); }
-  .team.red.active { box-shadow: 0 0 22px rgba(229,72,61,.45); }
-  .team .score { font-family: 'Lilita One', sans-serif; font-size: 34px; line-height: 1; color: #fff; min-width: 30px; text-align: center; }
-  .team .meta { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
-  .team .name { font-size: 13px; font-weight: 900; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .pips { display: flex; gap: 4px; }
-  .team.red .pips { justify-content: flex-end; }
-  .pip { width: 10px; height: 10px; border-radius: 3px; background: currentColor; opacity: .22; transition: opacity .3s, transform .3s; }
-  .pip.on { opacity: 1; }
-  .inning { display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 0 4px; font-size: 11px; font-weight: 800; color: var(--muted); }
-  .inning b { font-family: 'Lilita One', sans-serif; font-weight: 400; font-size: 24px; color: var(--gold); line-height: 1.05; }
+  if (ph === 'over') {
+    const w = game.winner, n = nameOf(w);
+    $('overTitle').textContent = n === 'You' ? 'You win!' : `${n} wins!`;
+    $('overTitle').style.color = w === 'blue' ? 'var(--blue-soft)' : 'var(--red-soft)';
+    $('finBlue').textContent = game.score.blue; $('finRed').textContent = game.score.red;
+    $('overSub').textContent = `${game.inning} inning${game.inning === 1 ? '' : 's'} played`;
+  }
+}
 
-  .turn {
-    position: absolute; top: 84px; left: 0; right: 0; text-align: center;
-    font-weight: 900; font-size: 15px; letter-spacing: .01em;
-    text-shadow: 0 2px 10px rgba(0,0,0,.7);
-  }
-  .turn .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 7px; vertical-align: 1px; }
+let toastTimer;
+function showToast(m) {
+  const t = $('toast');
+  t.className = 'toast'; void t.offsetWidth;
+  t.innerHTML = `${m.text}${m.sub ? `<small>${m.sub}</small>` : ''}`;
+  t.classList.add(m.kind, 'show');
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => t.className = 'toast', 1700);
+}
 
-  .hint {
-    position: absolute; top: 108px; left: 0; right: 0; text-align: center;
-    font-size: 13px; font-weight: 800; color: var(--muted); opacity: .85;
-    text-shadow: 0 2px 8px rgba(0,0,0,.8);
-    transition: opacity .5s;
+function showScreen(which) {
+  $('menu').classList.toggle('hidden', which !== 'menu');
+  $('hud').classList.toggle('hidden', which !== 'game');
+  if (which === 'menu') {
+    ['waitPanel', 'inningPanel', 'overPanel'].forEach(id => $(id).classList.add('hidden'));
+    $('menuMain').classList.remove('hidden'); $('menuOnline').classList.add('hidden');
   }
-  .corner { position: absolute; bottom: 14px; display: flex; gap: 8px; }
-  .corner.left { left: 14px; } .corner.right { right: 14px; }
-  .chip {
-    font: 800 13px 'Nunito', sans-serif; color: var(--ink);
-    background: rgba(10,12,30,.55); border: 1.5px solid rgba(255,255,255,.18);
-    padding: 8px 13px; border-radius: 999px; cursor: pointer;
-    -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px);
-  }
-  .chip:active { transform: scale(.96); }
+}
 
-  .toast {
-    position: absolute; top: 200px; left: 0; right: 0; text-align: center;
-    font-family: 'Lilita One', sans-serif; font-size: 50px; line-height: 1;
-    opacity: 0; pointer-events: none;
-  }
-  .toast small { display: block; font-family: 'Nunito', sans-serif; font-weight: 900; font-size: 18px; margin-top: 6px; }
-  .toast.show { animation: pop 1.6s cubic-bezier(.2,.9,.3,1.2) forwards; }
-  .toast.hole { color: var(--gold); text-shadow: 0 4px 0 #9c4f12, 0 0 34px rgba(255,201,74,.7); font-size: 60px; }
-  .toast.board { color: #fff; text-shadow: 0 4px 0 rgba(0,0,0,.45), 0 0 20px rgba(255,255,255,.3); }
-  .toast.off { color: #d6cbe4; text-shadow: 0 3px 0 rgba(0,0,0,.5); font-size: 40px; }
-  @keyframes pop {
-    0% { opacity: 0; transform: scale(.4) rotate(-8deg); }
-    14% { opacity: 1; transform: scale(1.14) rotate(-3deg); }
-    28% { transform: scale(1) rotate(-3deg); }
-    78% { opacity: 1; transform: scale(1) rotate(-3deg) translateY(0); }
-    100% { opacity: 0; transform: scale(.96) rotate(-3deg) translateY(-24px); }
-  }
+function demoBags() {
+  bags = [
+    { p: 'blue', x: -.42, d: 20.6, r: .5, s: 'b' }, { p: 'red', x: .36, d: 19.4, r: -.3, s: 'b' },
+    { p: 'blue', x: .15, d: 21.7, r: 1.1, s: 'b' }, { p: 'red', x: 1.6, d: 17.2, r: .2, s: 'g' }
+  ].map(fromSer);
+}
 
-  /* ---------- Screens & panels ---------- */
-  .screen {
-    position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center;
-    padding: 0 30px;
-  }
-  #menu { background: linear-gradient(180deg, rgba(8,10,28,.05) 0%, rgba(8,10,28,.2) 45%, rgba(8,10,28,.86) 72%); }
-  .title {
-    margin: 120px 0 0; text-align: center;
-    font-family: 'Lilita One', sans-serif; font-weight: 400;
-    font-size: 64px; line-height: .92; color: #ffe7b8;
-    transform: rotate(-4deg);
-    text-shadow: 0 2px 0 #e9a64a, 0 4px 0 #c27a2c, 0 6px 0 #8f4f1c, 0 10px 18px rgba(0,0,0,.55), 0 0 40px rgba(255,190,90,.35);
-  }
-  .title span { display: block; font-size: 86px; color: var(--gold); }
-  .tagline { margin-top: 18px; font-weight: 800; font-size: 14px; color: var(--muted); text-align: center; text-shadow: 0 2px 6px rgba(0,0,0,.8); }
-  .menu-actions { margin-top: auto; margin-bottom: 34px; width: 100%; display: flex; flex-direction: column; gap: 11px; }
-  .btn {
-    font: 900 17px 'Nunito', sans-serif; width: 100%; padding: 15px 18px;
-    border-radius: 14px; border: none; cursor: pointer;
-    background: var(--gold); color: #2a1a06;
-    box-shadow: 0 5px 0 var(--gold-deep), 0 10px 20px rgba(0,0,0,.35);
-    transition: transform .08s, box-shadow .08s;
-  }
-  .btn:active { transform: translateY(3px); box-shadow: 0 2px 0 var(--gold-deep), 0 4px 10px rgba(0,0,0,.35); }
-  .btn.ghost { background: rgba(255,255,255,.1); color: var(--ink); box-shadow: inset 0 0 0 1.5px rgba(255,255,255,.28); }
-  .btn.ghost:active { transform: translateY(2px); }
-  .btn:disabled { opacity: .5; cursor: default; }
-  .btn:focus-visible, .chip:focus-visible, input:focus-visible { outline: 3px solid #fff; outline-offset: 3px; }
-  .rules { font-size: 12.5px; font-weight: 700; color: var(--muted); text-align: center; line-height: 1.45; margin: 4px 0 0; }
+function startLocal(m) {
+  leaveRoom();
+  mode = m; me = null; animating = false; pendingGame = null; lastMsgId = null; cpuAim = null; cpuBestP = null;
+  clearTimeout(cpuTimer); cpuTimer = null; clearTimeout(inningTimer);
+  showScreen('game');
+  applyGame(newGame('blue'));
+}
 
-  .panel {
-    position: absolute; left: 24px; right: 24px; top: 50%; transform: translateY(-50%);
-    background: var(--panel); border: 1.5px solid rgba(255,255,255,.14);
-    -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px);
-    border-radius: 22px; padding: 24px 22px 22px; text-align: center;
-    box-shadow: 0 24px 60px rgba(0,0,0,.5);
-  }
-  .panel h2 { margin: 0 0 6px; font-family: 'Lilita One', sans-serif; font-weight: 400; font-size: 34px; line-height: 1.05; }
-  .panel p { margin: 0 0 14px; font-weight: 700; color: var(--muted); font-size: 14.5px; line-height: 1.45; }
-  .panel .stack { display: flex; flex-direction: column; gap: 10px; margin-top: 16px; }
-  .code {
-    font-family: 'Lilita One', sans-serif; font-size: 54px; letter-spacing: .14em; color: var(--gold);
-    margin: 6px 0 10px; text-shadow: 0 4px 0 #8f4f1c;
-    padding-left: .14em;
-  }
-  input.code-input {
-    width: 100%; font: 400 38px 'Lilita One', sans-serif; letter-spacing: .2em; text-align: center; text-transform: uppercase;
-    background: rgba(0,0,0,.35); color: var(--gold); border: 2px solid rgba(255,255,255,.2);
-    border-radius: 14px; padding: 10px 6px; padding-left: .2em; outline: none;
-  }
-  .err { color: #ffb4a8; font-weight: 800; font-size: 13.5px; min-height: 18px; margin-top: 8px; }
-  .inning-lines { display: flex; justify-content: center; gap: 22px; margin: 12px 0 8px; }
-  .inning-lines div { font-weight: 900; font-size: 15px; }
-  .inning-lines b { display: block; font-family: 'Lilita One', sans-serif; font-weight: 400; font-size: 40px; color: #fff; }
-  .big-result { font-family: 'Lilita One', sans-serif; font-size: 22px; color: var(--gold); }
-  .final-score { font-family: 'Lilita One', sans-serif; font-size: 46px; margin: 4px 0 6px; }
-  .final-score .b { color: var(--blue-soft); } .final-score .r { color: var(--red-soft); }
+function backToMenu() {
+  leaveRoom();
+  mode = null; game = null; animating = false; pendingGame = null; cpuAim = null;
+  clearTimeout(cpuTimer); cpuTimer = null; clearTimeout(inningTimer);
+  demoBags();
+  showScreen('menu');
+}
 
-  @media (prefers-reduced-motion: reduce) {
-    .toast.show { animation-duration: .01s; opacity: 1; animation: none; }
+/* =====================================================================
+   ONLINE (Firebase Realtime Database)
+   rooms/{CODE}: { players: {blue,red}, game: {...}, throw: {...} }
+   ===================================================================== */
+function initFirebase() {
+  if (db) return true;
+  if (!FIREBASE_CONFIG.databaseURL || typeof firebase === 'undefined') return false;
+  try { if (!firebase.apps.length) firebase.initializeApp(FIREBASE_CONFIG); db = firebase.database(); return true; }
+  catch (e) { console.error(e); return false; }
+}
+function setOnlineErr(t) { $('onlineErr').textContent = t || ''; }
+function genCode() { const A = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'; let s = ''; for (let i = 0; i < 4; i++) s += A[(Math.random() * A.length) | 0]; return s; }
+
+async function createRoom() {
+  if (!initFirebase()) return setOnlineErr('Online play needs your Firebase config. Add it at the top of index.html.');
+  setOnlineErr('Creating game…');
+  for (let tries = 0; tries < 6; tries++) {
+    const code = genCode(), ref = db.ref('rooms/' + code);
+    const init = { created: Date.now(), players: { blue: { id: clientId, online: true } }, game: { ...newGame('blue'), phase: 'waiting' } };
+    try {
+      const res = await ref.transaction(cur => cur ? undefined : init);
+      if (res.committed) { setOnlineErr(''); me = 'blue'; enterRoom(code); return; }
+    } catch (e) { console.error(e); return setOnlineErr('Could not reach the database. Check your Firebase rules and config.'); }
   }
-</style>
-</head>
-<body>
-<div id="stage">
-  <canvas id="c"></canvas>
-  <div id="ui">
-    <!-- In-game HUD -->
-    <div id="hud" class="hidden">
-      <div class="hud">
-        <div class="team blue" id="teamBlue">
-          <div class="score" id="scoreBlue">0</div>
-          <div class="meta"><div
+  setOnlineErr('Could not create a game. Try again.');
+}
+
+async function joinRoom(raw) {
+  const code = (raw || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  if (code.length !== 4) return setOnlineErr('Enter the 4-letter code your friend sent you.');
+  if (!initFirebase()) return setOnlineErr('Online play needs your Firebase config. Add it at the top of index.html.');
+  setOnlineErr('Joining…');
+  try {
+    const ref = db.ref('rooms/' + code);
+    const snap = await ref.once('value');
+    if (!snap.exists()) return setOnlineErr(`No game found with code ${code}. Check the code and try again.`);
+    const players = snap.val().players || {};
+    if (players.blue && players.blue.id === clientId) me = 'blue';
+    else if (players.red && players.red.id === clientId) me = 'red';
+    else {
+      const res = await ref.child('players/red').transaction(cur => (!cur || cur.id === clientId) ? { id: clientId, online: true } : undefined);
+      if (!res.committed) return setOnlineErr('That game already has two players.');
+      me = 'red';
+    }
+    setOnlineErr('');
+    enterRoom(code);
+  } catch (e) { console.error(e); setOnlineErr('Could not reach the database. Check your Firebase rules and config.'); }
+}
+
+function enterRoom(code) {
+  leaveRoom();
+  mode = 'online'; room = db.ref('rooms/' + code);
+  animating = false; pendingGame = null; lastMsgId = null; throwInit = false; lastThrowId = null; oppOnline = false;
+  $('waitCode').textContent = code;
+  try { history.replaceState(null, '', location.pathname + '?room=' + code); } catch (e) {}
+  const myOnline = room.child(`players/${me}/online`);
+  myOnline.set(true); myOnline.onDisconnect().set(false);
+  room.child('players').on('value', s => {
+    const pl = s.val() || {};
+    const o = pl[opp(me)];
+    oppOnline = !!(o && o.online);
+    if (me === 'blue' && o && game && game.phase === 'waiting') commit({ ...newGame('blue'), rev: game.rev });
+    updateHUD();
+  });
+  room.child('game').on('value', s => applyGame(s.val()));
+  room.child('throw').on('value', s => {
+    const t = s.val();
+    if (!throwInit) { throwInit = true; lastThrowId = t ? t.id : null; return; }
+    if (!t || t.id === lastThrowId) return;
+    lastThrowId = t.id;
+    if (t.by === me) return;
+    if (pendingGame) { const g = pendingGame; pendingGame = null; animating = false; applyGame(g); }
+    startThrow(t, false);
+  });
+  showScreen('game');
+}
+
+function leaveRoom() {
+  if (room) {
+    room.child('players').off(); room.child('game').off(); room.child('throw').off();
+    if (me) room.child(`players/${me}/online`).set(false);
+    room = null;
+    try { history.replaceState(null, '', location.pathname); } catch (e) {}
+  }
+}
+
+/* =====================================================================
+   INPUT
+   ===================================================================== */
+function toLogical(e) { const r = canvas.getBoundingClientRect(); return { x: (e.clientX - r.left) / K, y: (e.clientY - r.top) / K }; }
+const clampN = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+canvas.addEventListener('pointerdown', e => {
+  ensureAudio();
+  if (!canThrow()) return;
+  const p = toLogical(e);
+  if (Math.abs(p.x - HOME.x) > 85 || Math.abs(p.y - HOME.y) > 75) return;   // must grab the bag
+  drag = { gx: HOME.x - p.x, gy: HOME.y - p.y, x: HOME.x, y: HOME.y, vx: 0, vy: 0, s: [{ x: p.x, y: p.y, t: e.timeStamp }] };
+  try { canvas.setPointerCapture(e.pointerId); } catch (_) {}
+});
+canvas.addEventListener('pointermove', e => {
+  if (!drag) return;
+  const evs = e.getCoalescedEvents ? e.getCoalescedEvents() : [];
+  for (const ev of (evs.length ? evs : [e])) {
+    const p = toLogical(ev);
+    drag.s.push({ x: p.x, y: p.y, t: ev.timeStamp });
+    drag.x = clampN(p.x + drag.gx, 50, 350);
+    drag.y = clampN(p.y + drag.gy, 330, 630);
+  }
+  while (drag.s.length > 2 && drag.s[drag.s.length - 1].t - drag.s[0].t > 250) drag.s.shift();
+  const v = swipeVelocity(drag.s, e.timeStamp); drag.vx = v.vx; drag.vy = v.vy;
+});
+function release(e) {
+  if (!drag) return;
+  const d = drag; drag = null;
+  if (!canThrow()) return;
+  const v = swipeVelocity(d.s, e ? e.timeStamp : performance.now());
+  window.__lastSwipe = v;
+  if (v.vy > -300) {                         // not a real upward swing: bag goes back
+    $('hint').textContent = 'Swing the bag up toward the board, then let go';
+    hintShown = true; $('hint').style.opacity = .95;
+    return;
+  }
+  hintShown = false;
+  startThrow({ ...throwFromSwipe(v.vx, v.vy, d.x), voy: d.y - HOME.y, by: game.turn }, true);
+}
+canvas.addEventListener('pointerup', release);
+canvas.addEventListener('pointercancel', () => drag = null);
+
+$('cpuBtn').onclick = () => { ensureAudio(); sfx.click(); startLocal('cpu'); };
+$('localBtn').onclick = () => { ensureAudio(); sfx.click(); startLocal('local'); };
+$('onlineBtn').onclick = () => {
+  ensureAudio(); sfx.click();
+  $('menuMain').classList.add('hidden'); $('menuOnline').classList.remove('hidden');
+  setOnlineErr(initFirebase() ? '' : 'Online play needs your Firebase config. Add it at the top of index.html.');
+};
+$('backBtn').onclick = () => { $('menuMain').classList.remove('hidden'); $('menuOnline').classList.add('hidden'); setOnlineErr(''); };
+$('createBtn').onclick = () => { ensureAudio(); createRoom(); };
+$('joinBtn').onclick = () => { ensureAudio(); joinRoom($('codeInput').value); };
+$('codeInput').addEventListener('input', e => e.target.value = e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, ''));
+$('codeInput').addEventListener('keydown', e => { if (e.key === 'Enter') joinRoom(e.target.value); });
+$('quitBtn').onclick = backToMenu;
+$('overMenuBtn').onclick = backToMenu;
+$('cancelWaitBtn').onclick = () => { const r = room; if (r) r.child(`players/${me}/online`).onDisconnect().cancel(); backToMenu(); if (r) r.remove(); };
+$('againBtn').onclick = () => {
+  const loserFirst = game && game.winner ? opp(game.winner) : 'blue';
+  hintShown = mode !== 'online';
+  commit({ ...newGame(loserFirst), rev: game ? game.rev : 0 });
+};
+$('copyBtn').onclick = async () => {
+  const link = location.origin + location.pathname + '?room=' + $('waitCode').textContent;
+  try { await navigator.clipboard.writeText(link); $('copyBtn').textContent = 'Link copied'; }
+  catch (e) { prompt('Copy this invite link', link); }
+  setTimeout(() => $('copyBtn').textContent = 'Copy invite link', 2000);
+};
+function syncSoundBtn() { $('soundBtn').textContent = soundOn ? 'Sound on' : 'Sound off'; }
+$('soundBtn').onclick = () => { soundOn = !soundOn; try { localStorage.setItem('bbt-sound', soundOn ? 'on' : 'off'); } catch (e) {} syncSoundBtn(); };
+syncSoundBtn();
+
+/* =====================================================================
+   MAIN LOOP
+   ===================================================================== */
+let last = performance.now(), acc = 0;
+const reduceMotion = window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+function frame(now) {
+  const dt = Math.min(.05, (now - last) / 1000); last = now;
+  if (animating) {
+    acc += dt;
+    while (acc >= STEP) {
+      const ev = [];
+      physStep(bags, STEP, ev);
+      for (const e of ev) {
+        if (e.type === 'land') { if (e.surf === 'b') { burst('board', e.b); sfx.thud(.7); } else { burst('ground', e.b); sfx.grass(); } }
+        else if (e.type === 'hole') { burst('hole', e.b); sfx.hole(); }
+        else if (e.type === 'knock') { sfx.thud(.5); shake = 2; }
+        else if (e.type === 'bump') sfx.bump();
+      }
+      acc -= STEP;
+    }
+    if (allSettled(bags)) { acc = 0; onSettled(); }
+  }
+  render(now / 1000, dt);
+  requestAnimationFrame(frame);
+}
+
+function render(t, dt) {
+  ctx.setTransform(K * DPR, 0, 0, K * DPR, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+  ctx.save();
+  if (shake > .05 && !reduceMotion) { ctx.translate((Math.random() - .5) * shake, (Math.random() - .5) * shake); }
+  shake *= .86;
+  ctx.drawImage(bgLayer, 0, 0, W, H);
+  // twinkling bulbs
+  for (const b of bulbs) {
+    const f = .78 + .22 * Math.sin(t * b.sp + b.ph);
+    ctx.globalAlpha = f; ctx.drawImage(glowSprite, b.x - 22, b.y - 22, 44, 44);
+    ctx.globalAlpha = 1; ctx.fillStyle = '#fff1c9';
+    ctx.beginPath(); ctx.arc(b.x, b.y, 2.6, 0, Math.PI * 2); ctx.fill();
+  }
+  // bags behind the board, then the board, then the rest (far to near)
+  const sorted = bags.filter(b => b.st !== 'in').sort((a, b) => b.d - a.d);
+  const behind = sorted.filter(b => b.d > DB && b.st !== 'fall');
+  const front = sorted.filter(b => !(b.d > DB && b.st !== 'fall'));
+  behind.forEach(b => drawShadow(ctx, b)); behind.forEach(b => drawBag(ctx, b));
+  ctx.drawImage(boardLayer, 0, 0, W, H);
+  front.forEach(b => drawShadow(ctx, b));
+  front.forEach(b => drawBag(ctx, b));
+  drawParticles(ctx, dt);
+  drawReadyBag(t);
+  ctx.restore();
+}
+
+function drawReadyBag(t) {
+  if (!game || game.phase !== 'aim' || animating) return;
+  const c = game.turn;
+  let ox = 0, oy = Math.sin(t * 2.4) * 3, rot = Math.sin(t * .8) * .08;
+  if (drag) {                                  // bag follows the finger
+    ox = drag.x - HOME.x; oy = drag.y - HOME.y;
+    rot = clampN(drag.vx * .0004, -.45, .45);
+  } else if (cpuAim) {                         // computer winds up
+    const k = Math.min(1, (performance.now() - cpuAim.t0) / 600);
+    ox = -cpuAim.aim * 60 * k; oy = 38 * k;
+  }
+  const b = { p: c, x: START.x, d: START.d, z: START.z, rot, st: 'air', surf: null };
+  const mine = mode !== 'online' || c === me;  // dim the bag when it is the other player's turn
+  drawAirBag(ctx, b, ox, oy, mine ? 1 : .55, false);
+}
+
+/* =====================================================================
+   BOOT
+   ===================================================================== */
+if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
+  window.addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(() => {}));
+}
+window.addEventListener('resize', resize);
+resize();
+demoBags();
+showScreen('menu');
+requestAnimationFrame(frame);
+
+const params = new URLSearchParams(location.search);
+const roomParam = params.get('room');
+if (roomParam) {
+  $('menuMain').classList.add('hidden'); $('menuOnline').classList.remove('hidden');
+  $('codeInput').value = roomParam.toUpperCase();
+  if (initFirebase()) joinRoom(roomParam);
+  else setOnlineErr('Online play needs your Firebase config. Add it at the top of index.html.');
+}
+</script>
+</body>
+</html>
